@@ -1,1 +1,0 @@
-# hyperbolic-world-model

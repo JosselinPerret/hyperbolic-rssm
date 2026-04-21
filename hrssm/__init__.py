@@ -9,4 +9,5 @@ from .metrics       import (
 from .extensions    import (
     HyperbolicWorldModelSeparateBeta,
     HyperbolicWorldModelAwareDecoder,
+    HyperbolicWorldModelActionPrior,
 )

@@ -3,6 +3,7 @@ Extended model variants for next-step experiments.
 
   HyperbolicWorldModelSeparateBeta  — decoupled KL weights for tau and fibre terms
   HyperbolicWorldModelAwareDecoder  — geometry-aware decoder using Busemann features
+  HyperbolicWorldModelActionPrior   — explicit action-conditioned depth bias in prior
 """
 
 import torch
@@ -153,3 +154,97 @@ class HyperbolicWorldModelAwareDecoder(HyperbolicWorldModel):
         super().__init__(obs_dim, latent_dim, hidden_dim, enc_dim)
         # Replace the flat MLP decoder with the geometry-aware version
         self.decoder = _AwareDecoder(hidden_dim, latent_dim, obs_dim)
+
+
+# ---------------------------------------------------------------------------
+# Experiment 7 — Action-conditioned τ prior
+# ---------------------------------------------------------------------------
+
+class HyperbolicWorldModelActionPrior(HyperbolicWorldModel):
+    """
+    HG world model with an explicit structural bias in the prior:
+
+        μ_τ^p(t) = f_base(h_t) + δ(a_{t-1})
+
+    where δ is constrained by construction:
+        δ(+1) = +softplus(log_depth_bias)   > 0  (go deeper  → larger τ)
+        δ(-1) = −softplus(log_shallow_bias) < 0  (go shallower → smaller τ)
+        δ( 0) = 0
+
+    This directly encodes tree structure in the prior so that depth alignment
+    is reinforced at every step rather than being a fragile side-effect of KL.
+
+    Usage:
+        recons, kls, info = model(obs_seq, action_seq)
+    where action_seq is (batch, T) with int/float values in {-1, 0, +1}.
+    action_seq[:, t] is the direction moved *to arrive at* step t
+    (0 for the first step, ±1 for subsequent steps).
+    """
+
+    def __init__(
+        self,
+        obs_dim:    int = 64,
+        latent_dim: int = 16,
+        hidden_dim: int = 256,
+        enc_dim:    int = 128,
+    ):
+        super().__init__(obs_dim, latent_dim, hidden_dim, enc_dim)
+        # Initialised to softplus(-1) ≈ 0.31 — a modest initial bias
+        self.log_depth_bias   = nn.Parameter(torch.tensor(-1.0))
+        self.log_shallow_bias = nn.Parameter(torch.tensor(-1.0))
+
+    def _action_delta(self, actions_t: torch.Tensor) -> torch.Tensor:
+        """
+        actions_t: (batch,) float, values in {-1, 0, +1}
+        Returns per-batch τ offset (batch,).
+        """
+        deeper    = (actions_t > 0).float()
+        shallower = (actions_t < 0).float()
+        return (  deeper    * F.softplus(self.log_depth_bias)
+                - shallower * F.softplus(self.log_shallow_bias))
+
+    def forward(
+        self,
+        obs_seq:    torch.Tensor,               # (batch, T, obs_dim)
+        action_seq: torch.Tensor | None = None, # (batch, T) int/float
+    ):
+        batch, T, _ = obs_seq.shape
+        device = obs_seq.device
+        h = torch.zeros(batch, self.hidden_dim, device=device)
+
+        recons, kls = [], []
+        mu_taus, mu_bs, sigma_taus = [], [], []
+
+        for t in range(T):
+            enc = self.obs_encoder(obs_seq[:, t])
+
+            prior_params = self.prior_net(h)
+            prior        = self._parse_hg(prior_params)
+
+            # Action-conditioned offset on the prior's μ_τ
+            if action_seq is not None:
+                delta = self._action_delta(action_seq[:, t].to(device).float())
+                prior.mu_tau = prior.mu_tau + delta   # in-place attribute update
+
+            post_params = self.posterior_net(torch.cat([h, enc], dim=-1))
+            posterior   = self._parse_hg(post_params)
+
+            tau, b = posterior.rsample()
+            z      = torch.cat([tau.unsqueeze(-1), b], dim=-1)
+
+            recons.append(self.decoder(z))
+            kls.append(posterior.kl_divergence(prior))
+            mu_taus.append(posterior.mu_tau.detach())
+            mu_bs.append(posterior.mu_b.detach())
+            sigma_taus.append(posterior.sigma_tau.detach())
+
+            h = self.gru(z, h)
+
+        recons = torch.stack(recons, dim=1)
+        kls    = torch.stack(kls,    dim=1)
+        info   = {
+            "mu_tau":    torch.stack(mu_taus,    dim=1),
+            "mu_b":      torch.stack(mu_bs,      dim=1),
+            "sigma_tau": torch.stack(sigma_taus, dim=1),
+        }
+        return recons, kls, info

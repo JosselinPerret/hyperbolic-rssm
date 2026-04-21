@@ -116,15 +116,34 @@ class BaryTreeMDP:
         self,
         length: int = 10,
         start_node: Optional[int] = None,
+        max_depth: Optional[int] = None,
         rng: Optional[np.random.RandomState] = None,
     ) -> List[int]:
-        """Random walk of given length. Returns list of node indices."""
+        """
+        Random walk of given length.
+        If max_depth is set, treats nodes at that depth as leaves (no deeper moves).
+        Returns list of node indices.
+        """
         if rng is None:
             rng = np.random.RandomState()
-        curr = rng.randint(0, self.n_nodes) if start_node is None else start_node
+
+        if start_node is None:
+            if max_depth is not None:
+                valid = [n.idx for n in self.nodes if n.depth <= max_depth]
+                curr = int(rng.choice(valid))
+            else:
+                curr = rng.randint(0, self.n_nodes)
+        else:
+            curr = start_node
+
         traj = [curr]
         for _ in range(length - 1):
-            nbs = self._adj[curr]
+            n = self.nodes[curr]
+            if max_depth is not None:
+                nbs = ([c for c in n.children if self.nodes[c].depth <= max_depth]
+                       + ([n.parent] if n.parent >= 0 else []))
+            else:
+                nbs = self._adj[curr]
             curr = int(rng.choice(nbs)) if nbs else curr
             traj.append(curr)
         return traj
@@ -134,19 +153,21 @@ class BaryTreeMDP:
         batch_size: int,
         seq_len: int,
         rng: Optional[np.random.RandomState] = None,
+        max_depth: Optional[int] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Returns:
             obs_batch:    (batch, seq_len, obs_dim)  float32
             depth_batch:  (batch, seq_len)            int32
-            branch_batch: (batch, seq_len)            int32  (branch_id at parent)
+            branch_batch: (batch, seq_len)            int32
+        max_depth restricts walks to nodes at depth ≤ max_depth (for OOD training).
         """
         if rng is None:
             rng = np.random.RandomState()
 
         obs_list, depth_list, branch_list = [], [], []
         for _ in range(batch_size):
-            traj = self.sample_trajectory(length=seq_len, rng=rng)
+            traj = self.sample_trajectory(length=seq_len, max_depth=max_depth, rng=rng)
             obs_list.append(np.stack([self.nodes[i].obs    for i in traj]))
             depth_list.append([self.nodes[i].depth         for i in traj])
             branch_list.append([self.nodes[i].branch_id    for i in traj])
@@ -155,6 +176,43 @@ class BaryTreeMDP:
             np.stack(obs_list).astype(np.float32),
             np.array(depth_list, dtype=np.int32),
             np.array(branch_list, dtype=np.int32),
+        )
+
+    def sample_batch_with_actions(
+        self,
+        batch_size: int,
+        seq_len: int,
+        rng: Optional[np.random.RandomState] = None,
+        max_depth: Optional[int] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Like sample_batch but also returns action_batch.
+
+        action_batch[:, t]:
+            0   — first step (no prior move)
+           +1   — arrived by going deeper (depth increased)
+           -1   — arrived by going shallower (depth decreased)
+        """
+        if rng is None:
+            rng = np.random.RandomState()
+
+        obs_list, depth_list, branch_list, action_list = [], [], [], []
+        for _ in range(batch_size):
+            traj   = self.sample_trajectory(length=seq_len, max_depth=max_depth, rng=rng)
+            depths = [self.nodes[i].depth for i in traj]
+            obs_list.append(np.stack([self.nodes[i].obs      for i in traj]))
+            depth_list.append(depths)
+            branch_list.append([self.nodes[i].branch_id      for i in traj])
+            actions = [0] + [
+                int(np.sign(depths[t] - depths[t - 1])) for t in range(1, len(traj))
+            ]
+            action_list.append(actions)
+
+        return (
+            np.stack(obs_list).astype(np.float32),
+            np.array(depth_list,  dtype=np.int32),
+            np.array(branch_list, dtype=np.int32),
+            np.array(action_list, dtype=np.int8),
         )
 
     # ------------------------------------------------------------------

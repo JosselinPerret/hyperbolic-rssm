@@ -1,4 +1,7 @@
 # H-RSSM: Hyperbolic Recurrent State-Space Model
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/JosselinPerret/hyperbolic-rssm)
+
+---
 
 Implementation of the H-RSSM experiments described in the
 [portfolio article](https://josselinperret.github.io/projects/h-rssm).
